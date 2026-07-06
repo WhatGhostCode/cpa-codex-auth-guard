@@ -2,6 +2,8 @@
 
 一个 CPA（CLIProxyAPI）插件：**合并 401/402/403 凭证失效保护与 429 限额保护。**
 
+![Codex Auth Guard management panel](assets/management-panel.png)
+
 ## 它做什么
 
 1. **401/402/403 自动禁用**：Codex 凭证请求失败且状态码为 401、402 或 403 时，插件把对应 auth JSON 标记为 `disabled: true`，并在调度时跳过它。
