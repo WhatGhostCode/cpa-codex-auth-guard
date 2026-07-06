@@ -36,7 +36,7 @@ This repo ships a `registry.json`. After a GitHub release is published, it can b
 plugins:
   enabled: true
   store-sources:
-    - https://raw.githubusercontent.com/ysxk/codex-auth-guard/main/registry.json
+    - https://raw.githubusercontent.com/WhatGhostCode/cpa-codex-auth-guard/main/registry.json
 ```
 
 If you want every CPA user to see it without adding a custom source, submit the same registry entry to the official `router-for-me/CLIProxyAPI-Plugins-Store` repository.
