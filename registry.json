@@ -6,7 +6,7 @@
       "name": "Codex Auth Guard",
       "description": "Auto-disable or delete invalid Codex credentials after 401/402/403, and auto-ban/recover Codex credentials after 429 quota windows reset.",
       "author": "WhatGhostCode",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "repository": "https://github.com/WhatGhostCode/cpa-codex-auth-guard",
       "homepage": "https://github.com/WhatGhostCode/cpa-codex-auth-guard",
       "license": "MIT",

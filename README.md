@@ -34,7 +34,7 @@ OpenAI 的 ChatGPT/Codex 后端在 429 时会返回一组自定义头：
 
 This repo ships a `registry.json`. After a GitHub release is published, it can be used as a custom CPA plugin-store source:
 
-Latest release: https://github.com/WhatGhostCode/cpa-codex-auth-guard/releases/tag/v0.1.1
+Latest release: https://github.com/WhatGhostCode/cpa-codex-auth-guard/releases/tag/v0.1.2
 
 ```yaml
 plugins:
@@ -44,6 +44,15 @@ plugins:
 ```
 
 If you want every CPA user to see it without adding a custom source, submit the same registry entry to the official `router-for-me/CLIProxyAPI-Plugins-Store` repository.
+
+## 版本更新
+
+### v0.1.2
+
+- 在 401/402/403 和 429 自动删除开关前显示“已删除”计数。
+- 自动删除凭证成功后按状态码累加计数，刷新列表时同步更新计数显示。
+- 管理面板提示改为底部 toast；加载状态使用 spinner 动画。
+- 执行刷新、恢复、删除、查询额度等操作时，按钮会在请求期间禁用并在完成后恢复。
 
 ## 安装
 
@@ -59,7 +68,7 @@ winget install -e --id MartinStorsjo.LLVM-MinGW.UCRT
 
 ### 2. 编译
 
-也可以直接从 Release 下载对应平台的 zip：<https://github.com/WhatGhostCode/cpa-codex-auth-guard/releases/tag/v0.1.1>
+也可以直接从 Release 下载对应平台的 zip：<https://github.com/WhatGhostCode/cpa-codex-auth-guard/releases/tag/v0.1.2>
 
 ```powershell
 cd codex-auth-guard
