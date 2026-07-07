@@ -34,7 +34,7 @@ OpenAI 的 ChatGPT/Codex 后端在 429 时会返回一组自定义头：
 
 This repo ships a `registry.json`. After a GitHub release is published, it can be used as a custom CPA plugin-store source:
 
-Latest release: https://github.com/WhatGhostCode/cpa-codex-auth-guard/releases/tag/v0.1.0
+Latest release: https://github.com/WhatGhostCode/cpa-codex-auth-guard/releases/tag/v0.1.1
 
 ```yaml
 plugins:
@@ -59,7 +59,7 @@ winget install -e --id MartinStorsjo.LLVM-MinGW.UCRT
 
 ### 2. 编译
 
-也可以直接从 Release 下载对应平台的 zip：<https://github.com/WhatGhostCode/cpa-codex-auth-guard/releases/tag/v0.1.0>
+也可以直接从 Release 下载对应平台的 zip：<https://github.com/WhatGhostCode/cpa-codex-auth-guard/releases/tag/v0.1.1>
 
 ```powershell
 cd codex-auth-guard
