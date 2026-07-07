@@ -132,6 +132,9 @@ type disableState struct {
 	autoDelete401 bool
 	autoDelete402 bool
 	autoDelete403 bool
+	deleted401    int
+	deleted402    int
+	deleted403    int
 	loaded        bool
 }
 
@@ -154,6 +157,9 @@ type pluginSettings struct {
 	AutoDelete401 bool  `json:"auto_delete_401,omitempty"`
 	AutoDelete402 bool  `json:"auto_delete_402,omitempty"`
 	AutoDelete403 bool  `json:"auto_delete_403,omitempty"`
+	Deleted401    int   `json:"deleted_401_count,omitempty"`
+	Deleted402    int   `json:"deleted_402_count,omitempty"`
+	Deleted403    int   `json:"deleted_403_count,omitempty"`
 	AutoEnable429 *bool `json:"auto_enable_429,omitempty"`
 	AutoDelete429 bool  `json:"auto_delete_429,omitempty"`
 }
@@ -707,6 +713,9 @@ func (s *disableState) loadFromDisk() error {
 		s.autoDelete401 = state.Settings.AutoDelete401
 		s.autoDelete402 = state.Settings.AutoDelete402
 		s.autoDelete403 = state.Settings.AutoDelete403
+		s.deleted401 = state.Settings.Deleted401
+		s.deleted402 = state.Settings.Deleted402
+		s.deleted403 = state.Settings.Deleted403
 	}
 	s.loaded = true
 	return nil
@@ -730,7 +739,7 @@ func (s *disableState) saveLocked() error {
 	if s.disabled == nil {
 		s.disabled = make(map[string]disableEntry)
 	}
-	state := persistedDisabledState{Disabled: s.disabled, Settings: &pluginSettings{AutoDelete401: s.autoDelete401, AutoDelete402: s.autoDelete402, AutoDelete403: s.autoDelete403}}
+	state := persistedDisabledState{Disabled: s.disabled, Settings: &pluginSettings{AutoDelete401: s.autoDelete401, AutoDelete402: s.autoDelete402, AutoDelete403: s.autoDelete403, Deleted401: s.deleted401, Deleted402: s.deleted402, Deleted403: s.deleted403}}
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -838,6 +847,25 @@ func (s *disableState) setAutoDeleteStatus(statusCode int, enabled bool) {
 	}
 	if err := s.saveLocked(); err != nil {
 		slog.Warn("codex-auth-guard: failed to save disabled settings", "error", err)
+	}
+}
+
+func (s *disableState) incrementDeletedCount(statusCode int) {
+	s.ensureLoaded()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch statusCode {
+	case statusUnauthorized:
+		s.deleted401++
+	case statusPaymentRequired:
+		s.deleted402++
+	case statusForbidden:
+		s.deleted403++
+	default:
+		return
+	}
+	if err := s.saveLocked(); err != nil {
+		slog.Warn("codex-auth-guard: failed to save deleted count", "status_code", statusCode, "error", err)
 	}
 }
 
@@ -989,6 +1017,7 @@ func handleUsage(raw []byte) ([]byte, error) {
 				slog.Warn("codex-auth-guard: failed to auto-delete auth file after credential-disable status", "auth_id", authID, "status_code", record.Failure.StatusCode, "error", err)
 			} else if deleted {
 				disabledStore.clear(authID)
+				disabledStore.incrementDeletedCount(record.Failure.StatusCode)
 				slog.Warn("codex-auth-guard: auto-deleted credential after credential-disable status", "auth_id", authID, "status_code", record.Failure.StatusCode)
 			}
 			return okEnvelope(map[string]any{})
@@ -1326,6 +1355,9 @@ type managementSettings struct {
 	AutoDelete401     bool   `json:"auto_delete_401"`
 	AutoDelete402     bool   `json:"auto_delete_402"`
 	AutoDelete403     bool   `json:"auto_delete_403"`
+	Deleted401Count   int    `json:"deleted_401_count"`
+	Deleted402Count   int    `json:"deleted_402_count"`
+	Deleted403Count   int    `json:"deleted_403_count"`
 	AutoEnable429     bool   `json:"auto_enable_429"`
 	AutoDelete429     bool   `json:"auto_delete_429"`
 }
@@ -1347,8 +1379,11 @@ func currentManagementSettings() managementSettings {
 	autoDelete401 := disabledStore.autoDelete401
 	autoDelete402 := disabledStore.autoDelete402
 	autoDelete403 := disabledStore.autoDelete403
+	deleted401 := disabledStore.deleted401
+	deleted402 := disabledStore.deleted402
+	deleted403 := disabledStore.deleted403
 	disabledStore.mu.Unlock()
-	return managementSettings{Plugin: pluginName, Version: pluginVersion, AuthDir: authDir, DisabledStatePath: disabledPath, BanStatePath: banPath, AutoDelete401: autoDelete401, AutoDelete402: autoDelete402, AutoDelete403: autoDelete403, AutoEnable429: autoEnable429, AutoDelete429: autoDelete429}
+	return managementSettings{Plugin: pluginName, Version: pluginVersion, AuthDir: authDir, DisabledStatePath: disabledPath, BanStatePath: banPath, AutoDelete401: autoDelete401, AutoDelete402: autoDelete402, AutoDelete403: autoDelete403, Deleted401Count: deleted401, Deleted402Count: deleted402, Deleted403Count: deleted403, AutoEnable429: autoEnable429, AutoDelete429: autoDelete429}
 }
 
 func authIndexForFile(authID string) string {
@@ -1655,20 +1690,24 @@ func managementStatusPage() string {
 	}
 
 	settingsJSON, _ := json.Marshal(settings)
-	autoSwitch := func(id, key, description string, enabled bool) string {
+	autoSwitch := func(id, key, description string, enabled bool, countID string, deletedCount int) string {
 		className := "off"
 		state := "已关闭"
 		if enabled {
 			className = "on"
 			state = "已开启"
 		}
-		return `<button id="` + id + `" class="switch-button ` + className + `" role="switch" aria-checked="` + strconv.FormatBool(enabled) + `" onclick="toggleAutoDelete('` + key + `')"><span class="switch-label">` + html.EscapeString(description) + `</span><span class="switch-side"><span class="switch-state">` + state + `</span><span class="switch-track"><span class="switch-knob"></span></span></span></button>`
+		countHTML := ""
+		if countID != "" {
+			countHTML = `<span id="` + countID + `" class="delete-count">已删除 ` + strconv.Itoa(deletedCount) + `</span>`
+		}
+		return `<button id="` + id + `" class="switch-button ` + className + `" role="switch" aria-checked="` + strconv.FormatBool(enabled) + `" onclick="toggleAutoDelete('` + key + `')">` + countHTML + `<span class="switch-label">` + html.EscapeString(description) + `</span><span class="switch-side"><span class="switch-state">` + state + `</span><span class="switch-track"><span class="switch-knob"></span></span></span></button>`
 	}
-	auto401Switch := autoSwitch("toggleAuto401", "auto_delete_401", "自动删除 401：当请求遇到401凭证时自动删除该凭证。", settings.AutoDelete401)
-	auto402Switch := autoSwitch("toggleAuto402", "auto_delete_402", "自动删除 402：当请求遇到402凭证时自动删除该凭证。", settings.AutoDelete402)
-	auto403Switch := autoSwitch("toggleAuto403", "auto_delete_403", "自动删除 403：当请求遇到403凭证时自动删除该凭证。", settings.AutoDelete403)
-	autoEnable429Switch := autoSwitch("toggleAutoEnable429", "auto_enable_429", "自动启用 429：重置时间到了自动启用该凭证。", settings.AutoEnable429)
-	auto429Switch := autoSwitch("toggleAuto429", "auto_delete_429", "自动删除 429：当请求遇到429凭证时自动删除该凭证。", settings.AutoDelete429)
+	auto401Switch := autoSwitch("toggleAuto401", "auto_delete_401", "自动删除 401：当请求遇到401凭证时自动删除该凭证。", settings.AutoDelete401, "deletedCount401", settings.Deleted401Count)
+	auto402Switch := autoSwitch("toggleAuto402", "auto_delete_402", "自动删除 402：当请求遇到402凭证时自动删除该凭证。", settings.AutoDelete402, "deletedCount402", settings.Deleted402Count)
+	auto403Switch := autoSwitch("toggleAuto403", "auto_delete_403", "自动删除 403：当请求遇到403凭证时自动删除该凭证。", settings.AutoDelete403, "deletedCount403", settings.Deleted403Count)
+	autoEnable429Switch := autoSwitch("toggleAutoEnable429", "auto_enable_429", "自动启用 429：重置时间到了自动启用该凭证。", settings.AutoEnable429, "", 0)
+	auto429Switch := autoSwitch("toggleAuto429", "auto_delete_429", "自动删除 429：当请求遇到429凭证时自动删除该凭证。", settings.AutoDelete429, "", 0)
 	return `<!doctype html>
 <html lang="zh-Hans">
 <head>
@@ -1691,7 +1730,7 @@ func managementStatusPage() string {
 :root,[data-theme=white]{--bg-primary:#fff;--bg-secondary:#f8fafc;--panel:#fff;--text-primary:#0f172a;--text-secondary:#64748b;--border:#e2e8f0;--primary-color:#2563eb;--danger-color:#dc2626;--primary-soft:#2563eb1a;--danger-soft:#dc26261a;--shadow:0 18px 45px rgba(15,23,42,.08)}
 [data-theme=light]{--bg-primary:#f0eee8;--bg-secondary:#faf9f5;--panel:#fffaf0;--text-primary:#2f2a24;--text-secondary:#6f675e;--border:#ded7ca;--primary-color:#2563eb;--danger-color:#dc2626;--primary-soft:#2563eb1a;--danger-soft:#dc26261a;--shadow:0 18px 45px rgba(58,45,28,.10)}
 [data-theme=dark]{--bg-primary:#0f172a;--bg-secondary:#111827;--panel:#1e293b;--text-primary:#e5e7eb;--text-secondary:#94a3b8;--border:#334155;--primary-color:#60a5fa;--danger-color:#f87171;--primary-soft:#1d4ed833;--danger-soft:#dc262633;--shadow:0 18px 45px rgba(0,0,0,.30)}
-*{box-sizing:border-box}body{margin:0;height:100vh;overflow:hidden;background:linear-gradient(180deg,var(--bg-primary),var(--bg-secondary));color:var(--text-primary);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:80%;height:100vh;margin:0 auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;height:calc(100vh - 36px);min-height:0}.panel{display:flex;flex-direction:column;min-height:0;background:var(--panel);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);padding:18px}.panel-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}.panel-head h2{margin:0}.module-desc{margin:4px 0 0;color:var(--text-secondary);font-size:13px;line-height:1.45}.notice{min-height:20px;color:var(--text-secondary);font-size:13px;text-align:right;white-space:pre-wrap;margin-left:auto}.count{background:var(--primary-soft);color:var(--primary-color);padding:4px 10px;border-radius:999px;font-weight:700}.count-right{align-self:center}.search-row{display:flex;gap:10px}.status-filter{max-width:150px}.search{width:100%;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary);color:var(--text-primary);padding:10px 12px;margin-bottom:10px;outline:none}.search:focus{border-color:var(--primary-color);box-shadow:0 0 0 3px var(--primary-soft)}.credential-card{cursor:pointer;display:flex;align-items:center;gap:12px;border:1px solid var(--border);border-radius:14px;padding:12px;margin-top:10px;background:color-mix(in srgb,var(--panel) 92%,var(--bg-secondary))}.credential-card[hidden]{display:none}.card-main{min-width:0;flex:1}.auth-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;overflow-wrap:anywhere}.meta{color:var(--text-secondary);font-size:13px;margin-top:4px;line-height:1.55}.reset-line{display:inline-block;margin-top:2px}.card-actions{display:flex;gap:8px;flex-wrap:wrap}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}.bulk-actions{margin-bottom:10px}.right-actions{margin-left:auto;display:flex;gap:10px;align-items:center}.select-all{display:inline-flex;align-items:center;gap:6px;font-weight:700}.selected-count{color:var(--text-secondary);font-size:13px}.list-scroll{flex:1;min-height:0;overflow-y:auto;padding-right:4px}.list-scroll::-webkit-scrollbar{width:8px}.list-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:999px}button{border:0;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer;background:var(--primary-color);color:#fff}button.secondary{background:var(--primary-soft);color:var(--primary-color)}button.danger{background:var(--danger-color);color:#fff}button.ghost-danger{background:var(--danger-soft);color:var(--danger-color)}button.switch-button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;margin:4px 0 12px;background:var(--primary-soft);color:var(--text-primary)}.switch-side{display:flex;align-items:center;gap:8px;margin-left:auto}.switch-state{color:var(--text-secondary);font-size:13px;white-space:nowrap}.switch-track{width:44px;height:24px;border-radius:999px;background:var(--border);padding:3px;transition:.18s;flex:0 0 auto}.switch-knob{display:block;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.25);transition:.18s}.switch-button.on .switch-track{background:var(--primary-color)}.switch-button.on .switch-knob{transform:translateX(20px)}.switch-label{font-weight:700}.empty{padding:22px;border:1px dashed var(--border);border-radius:14px;color:var(--text-secondary);text-align:center}@supports (height:100dvh){body,.wrap{height:100dvh}.grid{height:calc(100dvh - 36px)}}@media(max-width:820px){.grid{grid-template-columns:1fr}.wrap{padding:12px}.right-actions{margin-left:0;width:100%;justify-content:flex-end}}
+*{box-sizing:border-box}body{margin:0;height:100vh;overflow:hidden;background:linear-gradient(180deg,var(--bg-primary),var(--bg-secondary));color:var(--text-primary);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:80%;height:100vh;margin:0 auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;height:calc(100vh - 36px);min-height:0}.panel{display:flex;flex-direction:column;min-height:0;background:var(--panel);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);padding:18px}.panel-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}.panel-head h2{margin:0}.module-desc{margin:4px 0 0;color:var(--text-secondary);font-size:13px;line-height:1.45}.notice{min-height:20px;color:var(--text-secondary);font-size:13px;text-align:right;white-space:pre-wrap;margin-left:auto}.count{background:var(--primary-soft);color:var(--primary-color);padding:4px 10px;border-radius:999px;font-weight:700}.count-right{align-self:center}.search-row{display:flex;gap:10px}.status-filter{max-width:150px}.search{width:100%;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary);color:var(--text-primary);padding:10px 12px;margin-bottom:10px;outline:none}.search:focus{border-color:var(--primary-color);box-shadow:0 0 0 3px var(--primary-soft)}.credential-card{cursor:pointer;display:flex;align-items:center;gap:12px;border:1px solid var(--border);border-radius:14px;padding:12px;margin-top:10px;background:color-mix(in srgb,var(--panel) 92%,var(--bg-secondary))}.credential-card[hidden]{display:none}.card-main{min-width:0;flex:1}.auth-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;overflow-wrap:anywhere}.meta{color:var(--text-secondary);font-size:13px;margin-top:4px;line-height:1.55}.reset-line{display:inline-block;margin-top:2px}.card-actions{display:flex;gap:8px;flex-wrap:wrap}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}.bulk-actions{margin-bottom:10px}.right-actions{margin-left:auto;display:flex;gap:10px;align-items:center}.select-all{display:inline-flex;align-items:center;gap:6px;font-weight:700}.selected-count{color:var(--text-secondary);font-size:13px}.list-scroll{flex:1;min-height:0;overflow-y:auto;padding-right:4px}.list-scroll::-webkit-scrollbar{width:8px}.list-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:999px}button{border:0;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer;background:var(--primary-color);color:#fff}button.secondary{background:var(--primary-soft);color:var(--primary-color)}button.danger{background:var(--danger-color);color:#fff}button.ghost-danger{background:var(--danger-soft);color:var(--danger-color)}button.switch-button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;margin:4px 0 12px;background:var(--primary-soft);color:var(--text-primary)}.delete-count{background:var(--bg-secondary);border:1px solid var(--border);border-radius:999px;color:var(--text-secondary);font-size:12px;padding:4px 8px;white-space:nowrap}.switch-side{display:flex;align-items:center;gap:8px;margin-left:auto}.switch-state{color:var(--text-secondary);font-size:13px;white-space:nowrap}.switch-track{width:44px;height:24px;border-radius:999px;background:var(--border);padding:3px;transition:.18s;flex:0 0 auto}.switch-knob{display:block;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.25);transition:.18s}.switch-button.on .switch-track{background:var(--primary-color)}.switch-button.on .switch-knob{transform:translateX(20px)}.switch-label{font-weight:700}.empty{padding:22px;border:1px dashed var(--border);border-radius:14px;color:var(--text-secondary);text-align:center}@supports (height:100dvh){body,.wrap{height:100dvh}.grid{height:calc(100dvh - 36px)}}@media(max-width:820px){.grid{grid-template-columns:1fr}.wrap{padding:12px}.right-actions{margin-left:0;width:100%;justify-content:flex-end}}
 </style>
 </head>
 <body><main class="wrap">

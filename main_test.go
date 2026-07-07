@@ -60,6 +60,9 @@ func resetStoresForTest(t *testing.T) {
 	oldAutoDelete401 := disabledStore.autoDelete401
 	oldAutoDelete402 := disabledStore.autoDelete402
 	oldAutoDelete403 := disabledStore.autoDelete403
+	oldDeleted401 := disabledStore.deleted401
+	oldDeleted402 := disabledStore.deleted402
+	oldDeleted403 := disabledStore.deleted403
 	oldDisabledLoaded := disabledStore.loaded
 	disabledStore.disabled = make(map[string]disableEntry)
 	disabledStore.path = filepath.Join(tmp, "disabled.json")
@@ -67,6 +70,9 @@ func resetStoresForTest(t *testing.T) {
 	disabledStore.autoDelete401 = false
 	disabledStore.autoDelete402 = false
 	disabledStore.autoDelete403 = false
+	disabledStore.deleted401 = 0
+	disabledStore.deleted402 = 0
+	disabledStore.deleted403 = 0
 	disabledStore.loaded = true
 	disabledStore.mu.Unlock()
 
@@ -87,6 +93,9 @@ func resetStoresForTest(t *testing.T) {
 		disabledStore.autoDelete401 = oldAutoDelete401
 		disabledStore.autoDelete402 = oldAutoDelete402
 		disabledStore.autoDelete403 = oldAutoDelete403
+		disabledStore.deleted401 = oldDeleted401
+		disabledStore.deleted402 = oldDeleted402
+		disabledStore.deleted403 = oldDeleted403
 		disabledStore.loaded = oldDisabledLoaded
 		disabledStore.mu.Unlock()
 	})
@@ -198,6 +207,26 @@ func TestAutoDelete403DeletesAuthFileInsteadOfDisabling(t *testing.T) {
 	}
 }
 
+func TestAutoDelete401402403IncrementsDeletedCountsByStatus(t *testing.T) {
+	resetStoresForTest(t)
+	for _, statusCode := range []int{401, 402, 403} {
+		disabledStore.setAutoDeleteStatus(statusCode, true)
+		authID := "delete-" + strconv.Itoa(statusCode) + ".json"
+		writeAuthFile(t, authID)
+		if _, err := handleUsage(usageRecord(authID, statusCode)); err != nil {
+			t.Fatalf("handle usage %d: %v", statusCode, err)
+		}
+	}
+
+	resp := dispatchManagement(pluginapi.ManagementRequest{Method: "GET", Path: "/v0/management/plugins/codex-auth-guard/settings"})
+	body := string(resp.Body)
+	for _, want := range []string{`"deleted_401_count": 1`, `"deleted_402_count": 1`, `"deleted_403_count": 1`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("settings response missing %s in %s", want, body)
+		}
+	}
+}
+
 func TestUsage429PersistsBanAndDisablesAuthFile(t *testing.T) {
 	resetStoresForTest(t)
 	writeAuthFile(t, "ban.json")
@@ -301,7 +330,10 @@ func TestSchedulerSkipsDisabledAndBannedAndDoesNotFallbackWhenAllBlocked(t *test
 func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 	resetStoresForTest(t)
 	disabledStore.set("disabled-ui.json", disableEntry{Reason: "403 Forbidden", StatusCode: 403, DisabledAt: time.Date(2026, 7, 6, 1, 2, 3, 0, time.UTC)})
-	banStore.set("banned-ui.json", banEntry{ResetAt: time.Date(2026, 7, 8, 2, 3, 4, 0, time.UTC), Window: "5h"})
+	disabledStore.incrementDeletedCount(statusUnauthorized)
+	disabledStore.incrementDeletedCount(statusUnauthorized)
+	disabledStore.incrementDeletedCount(statusPaymentRequired)
+	banStore.set("banned-ui.json", banEntry{ResetAt: time.Date(2026, 7, 9, 2, 3, 4, 0, time.UTC), Window: "5h"})
 	resp := dispatchManagement(pluginapi.ManagementRequest{Method: "GET", Path: "/v0/resource/plugins/codex-auth-guard/status"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("status=%d body=%s", resp.StatusCode, string(resp.Body))
@@ -316,6 +348,9 @@ func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 		"banned-ui.json",
 		"auto_delete_401",
 		"auto_delete_429",
+		"id=\"deletedCount401\" class=\"delete-count\">已删除 2</span>",
+		"id=\"deletedCount402\" class=\"delete-count\">已删除 1</span>",
+		"id=\"deletedCount403\" class=\"delete-count\">已删除 0</span>",
 		"自动删除 401：当请求遇到401凭证时自动删除该凭证。",
 		"自动删除 402：当请求遇到402凭证时自动删除该凭证。",
 		"自动删除 403：当请求遇到403凭证时自动删除该凭证。",
@@ -392,7 +427,7 @@ func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 		"天",
 		"小时",
 		"分钟",
-		"重置时间：2026-07-08 10:03:04",
+		"重置时间：2026-07-09 10:03:04",
 		"class=\"reset-line\"",
 		"查询额度",
 		"checkQuota(this)",
