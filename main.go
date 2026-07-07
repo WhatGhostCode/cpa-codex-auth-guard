@@ -109,6 +109,7 @@ type banState struct {
 	authDir       string
 	autoEnable429 bool
 	autoDelete429 bool
+	deleted429    int
 	loaded        bool
 }
 
@@ -162,6 +163,7 @@ type pluginSettings struct {
 	Deleted403    int   `json:"deleted_403_count,omitempty"`
 	AutoEnable429 *bool `json:"auto_enable_429,omitempty"`
 	AutoDelete429 bool  `json:"auto_delete_429,omitempty"`
+	Deleted429    int   `json:"deleted_429_count,omitempty"`
 }
 
 type pluginConfig struct {
@@ -324,6 +326,7 @@ func (s *banState) loadFromDisk() error {
 			s.autoEnable429 = *state.Settings.AutoEnable429
 		}
 		s.autoDelete429 = state.Settings.AutoDelete429
+		s.deleted429 = state.Settings.Deleted429
 	}
 	s.loaded = true
 	return nil
@@ -353,7 +356,7 @@ func (s *banState) saveLocked() error {
 			return err
 		}
 	}
-	raw, err := json.MarshalIndent(persistedBanState{Bans: s.bans, Settings: &pluginSettings{AutoEnable429: boolPtr(s.autoEnable429), AutoDelete429: s.autoDelete429}}, "", "  ")
+	raw, err := json.MarshalIndent(persistedBanState{Bans: s.bans, Settings: &pluginSettings{AutoEnable429: boolPtr(s.autoEnable429), AutoDelete429: s.autoDelete429, Deleted429: s.deleted429}}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -558,6 +561,16 @@ func (s *banState) setAutoDelete429(enabled bool) {
 	s.autoDelete429 = enabled
 	if err := s.saveLocked(); err != nil {
 		slog.Warn("codex-429-autoban: failed to save settings", "error", err)
+	}
+}
+
+func (s *banState) incrementDeletedCount() {
+	s.ensureLoaded()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deleted429++
+	if err := s.saveLocked(); err != nil {
+		slog.Warn("codex-auth-guard: failed to save 429 deleted count", "error", err)
 	}
 }
 
@@ -1048,6 +1061,7 @@ func handleUsage(raw []byte) ([]byte, error) {
 			slog.Warn("codex-auth-guard: failed to auto-delete auth file after 429", "auth_id", authID, "error", err)
 		} else if deleted {
 			banStore.clear(authID)
+			banStore.incrementDeletedCount()
 			slog.Warn("codex-auth-guard: auto-deleted credential after 429", "auth_id", authID)
 		}
 		return okEnvelope(map[string]any{})
@@ -1360,6 +1374,7 @@ type managementSettings struct {
 	Deleted403Count   int    `json:"deleted_403_count"`
 	AutoEnable429     bool   `json:"auto_enable_429"`
 	AutoDelete429     bool   `json:"auto_delete_429"`
+	Deleted429Count   int    `json:"deleted_429_count"`
 }
 
 func currentManagementSettings() managementSettings {
@@ -1370,6 +1385,7 @@ func currentManagementSettings() managementSettings {
 	banPath := banStore.statePathLocked()
 	autoEnable429 := banStore.autoEnable429
 	autoDelete429 := banStore.autoDelete429
+	deleted429 := banStore.deleted429
 	banStore.mu.Unlock()
 	disabledStore.mu.Lock()
 	if strings.TrimSpace(disabledStore.authDirLocked()) != "" {
@@ -1383,7 +1399,7 @@ func currentManagementSettings() managementSettings {
 	deleted402 := disabledStore.deleted402
 	deleted403 := disabledStore.deleted403
 	disabledStore.mu.Unlock()
-	return managementSettings{Plugin: pluginName, Version: pluginVersion, AuthDir: authDir, DisabledStatePath: disabledPath, BanStatePath: banPath, AutoDelete401: autoDelete401, AutoDelete402: autoDelete402, AutoDelete403: autoDelete403, Deleted401Count: deleted401, Deleted402Count: deleted402, Deleted403Count: deleted403, AutoEnable429: autoEnable429, AutoDelete429: autoDelete429}
+	return managementSettings{Plugin: pluginName, Version: pluginVersion, AuthDir: authDir, DisabledStatePath: disabledPath, BanStatePath: banPath, AutoDelete401: autoDelete401, AutoDelete402: autoDelete402, AutoDelete403: autoDelete403, Deleted401Count: deleted401, Deleted402Count: deleted402, Deleted403Count: deleted403, AutoEnable429: autoEnable429, AutoDelete429: autoDelete429, Deleted429Count: deleted429}
 }
 
 func authIndexForFile(authID string) string {
@@ -1676,7 +1692,7 @@ func managementStatusPage() string {
 		disabledCards.WriteString(`<div class="empty">当前没有被 401/402/403 停用的凭证</div>`)
 	} else {
 		for _, item := range disabledStatus.Disabled {
-			disabledCards.WriteString(`<article class="credential-card" data-auth="` + html.EscapeString(item.AuthID) + `" data-status="` + strconv.Itoa(item.StatusCode) + `" onclick="toggleCardSelection(event, 'disabled')"><label class="check"><input class="disabled-check" type="checkbox" value="` + html.EscapeString(item.AuthID) + `" onchange="updateSelection('disabled')"></label><div class="card-main"><div class="auth-id">` + html.EscapeString(item.AuthID) + `</div><div class="meta">` + html.EscapeString(item.Reason) + ` · HTTP ` + strconv.Itoa(item.StatusCode) + `<br><span class="time-line">` + html.EscapeString(formatBeijingUnix(item.DisabledAtUnix)) + `</span></div></div><div class="card-actions"><button class="secondary" data-auth="` + html.EscapeString(item.AuthID) + `" onclick="enableAuth(this.dataset.auth)">恢复</button><button class="danger" data-auth="` + html.EscapeString(item.AuthID) + `" onclick="deleteDisabled(this.dataset.auth)">删除文件</button></div></article>`)
+			disabledCards.WriteString(`<article class="credential-card" data-auth="` + html.EscapeString(item.AuthID) + `" data-status="` + strconv.Itoa(item.StatusCode) + `" onclick="toggleCardSelection(event, 'disabled')"><label class="check"><input class="disabled-check" type="checkbox" value="` + html.EscapeString(item.AuthID) + `" onchange="updateSelection('disabled')"></label><div class="card-main"><div class="auth-id">` + html.EscapeString(item.AuthID) + `</div><div class="meta">` + html.EscapeString(item.Reason) + ` · HTTP ` + strconv.Itoa(item.StatusCode) + `<br><span class="time-line">` + html.EscapeString(formatBeijingUnix(item.DisabledAtUnix)) + `</span></div></div><div class="card-actions"><button class="secondary" data-auth="` + html.EscapeString(item.AuthID) + `" onclick="enableAuth(this.dataset.auth, this)">恢复</button><button class="danger" data-auth="` + html.EscapeString(item.AuthID) + `" onclick="deleteDisabled(this.dataset.auth, this)">删除文件</button></div></article>`)
 		}
 	}
 
@@ -1685,7 +1701,7 @@ func managementStatusPage() string {
 		banCards.WriteString(`<div class="empty">当前没有被 429 停用的凭证</div>`)
 	} else {
 		for _, item := range banStatus.Bans {
-			banCards.WriteString(`<article class="credential-card" data-auth="` + html.EscapeString(item.AuthID) + `" data-auth-index="` + html.EscapeString(item.AuthIndex) + `" onclick="toggleCardSelection(event, 'ban')"><label class="check"><input class="ban-check" type="checkbox" value="` + html.EscapeString(item.AuthID) + `" onchange="updateSelection('ban')"></label><div class="card-main"><div class="auth-id">` + html.EscapeString(item.AuthID) + `</div><div class="meta">窗口 ` + html.EscapeString(item.Window) + ` · 剩余 ` + formatRemainingDuration(item.RemainingSeconds) + `<br><span class="reset-line">重置时间：` + html.EscapeString(formatBeijingUnix(item.ResetAtUnix)) + `</span></div></div><div class="card-actions"><button class="secondary" data-auth="` + html.EscapeString(item.AuthID) + `" data-auth-index="` + html.EscapeString(item.AuthIndex) + `" onclick="checkQuota(this)">查询额度</button><button class="secondary" data-auth="` + html.EscapeString(item.AuthID) + `" onclick="unbanAuth(this.dataset.auth)">恢复</button><button class="danger" data-auth="` + html.EscapeString(item.AuthID) + `" onclick="deleteBan(this.dataset.auth)">删除文件</button></div></article>`)
+			banCards.WriteString(`<article class="credential-card" data-auth="` + html.EscapeString(item.AuthID) + `" data-auth-index="` + html.EscapeString(item.AuthIndex) + `" onclick="toggleCardSelection(event, 'ban')"><label class="check"><input class="ban-check" type="checkbox" value="` + html.EscapeString(item.AuthID) + `" onchange="updateSelection('ban')"></label><div class="card-main"><div class="auth-id">` + html.EscapeString(item.AuthID) + `</div><div class="meta">窗口 ` + html.EscapeString(item.Window) + ` · 剩余 ` + formatRemainingDuration(item.RemainingSeconds) + `<br><span class="reset-line">重置时间：` + html.EscapeString(formatBeijingUnix(item.ResetAtUnix)) + `</span></div></div><div class="card-actions"><button class="secondary" data-auth="` + html.EscapeString(item.AuthID) + `" data-auth-index="` + html.EscapeString(item.AuthIndex) + `" onclick="checkQuota(this)">查询额度</button><button class="secondary" data-auth="` + html.EscapeString(item.AuthID) + `" onclick="unbanAuth(this.dataset.auth, this)">恢复</button><button class="danger" data-auth="` + html.EscapeString(item.AuthID) + `" onclick="deleteBan(this.dataset.auth, this)">删除文件</button></div></article>`)
 		}
 	}
 
@@ -1701,13 +1717,13 @@ func managementStatusPage() string {
 		if countID != "" {
 			countHTML = `<span id="` + countID + `" class="delete-count">已删除 ` + strconv.Itoa(deletedCount) + `</span>`
 		}
-		return `<button id="` + id + `" class="switch-button ` + className + `" role="switch" aria-checked="` + strconv.FormatBool(enabled) + `" onclick="toggleAutoDelete('` + key + `')">` + countHTML + `<span class="switch-label">` + html.EscapeString(description) + `</span><span class="switch-side"><span class="switch-state">` + state + `</span><span class="switch-track"><span class="switch-knob"></span></span></span></button>`
+		return `<button id="` + id + `" class="switch-button ` + className + `" role="switch" aria-checked="` + strconv.FormatBool(enabled) + `" onclick="toggleAutoDelete('` + key + `', this)"><span class="switch-label">` + html.EscapeString(description) + `</span><span class="switch-side">` + countHTML + `<span class="switch-state">` + state + `</span><span class="switch-track"><span class="switch-knob"></span></span></span></button>`
 	}
 	auto401Switch := autoSwitch("toggleAuto401", "auto_delete_401", "自动删除 401：当请求遇到401凭证时自动删除该凭证。", settings.AutoDelete401, "deletedCount401", settings.Deleted401Count)
 	auto402Switch := autoSwitch("toggleAuto402", "auto_delete_402", "自动删除 402：当请求遇到402凭证时自动删除该凭证。", settings.AutoDelete402, "deletedCount402", settings.Deleted402Count)
 	auto403Switch := autoSwitch("toggleAuto403", "auto_delete_403", "自动删除 403：当请求遇到403凭证时自动删除该凭证。", settings.AutoDelete403, "deletedCount403", settings.Deleted403Count)
 	autoEnable429Switch := autoSwitch("toggleAutoEnable429", "auto_enable_429", "自动启用 429：重置时间到了自动启用该凭证。", settings.AutoEnable429, "", 0)
-	auto429Switch := autoSwitch("toggleAuto429", "auto_delete_429", "自动删除 429：当请求遇到429凭证时自动删除该凭证。", settings.AutoDelete429, "", 0)
+	auto429Switch := autoSwitch("toggleAuto429", "auto_delete_429", "自动删除 429：当请求遇到429凭证时自动删除该凭证。", settings.AutoDelete429, "deletedCount429", settings.Deleted429Count)
 	return `<!doctype html>
 <html lang="zh-Hans">
 <head>
@@ -1730,18 +1746,24 @@ func managementStatusPage() string {
 :root,[data-theme=white]{--bg-primary:#fff;--bg-secondary:#f8fafc;--panel:#fff;--text-primary:#0f172a;--text-secondary:#64748b;--border:#e2e8f0;--primary-color:#2563eb;--danger-color:#dc2626;--primary-soft:#2563eb1a;--danger-soft:#dc26261a;--shadow:0 18px 45px rgba(15,23,42,.08)}
 [data-theme=light]{--bg-primary:#f0eee8;--bg-secondary:#faf9f5;--panel:#fffaf0;--text-primary:#2f2a24;--text-secondary:#6f675e;--border:#ded7ca;--primary-color:#2563eb;--danger-color:#dc2626;--primary-soft:#2563eb1a;--danger-soft:#dc26261a;--shadow:0 18px 45px rgba(58,45,28,.10)}
 [data-theme=dark]{--bg-primary:#0f172a;--bg-secondary:#111827;--panel:#1e293b;--text-primary:#e5e7eb;--text-secondary:#94a3b8;--border:#334155;--primary-color:#60a5fa;--danger-color:#f87171;--primary-soft:#1d4ed833;--danger-soft:#dc262633;--shadow:0 18px 45px rgba(0,0,0,.30)}
-*{box-sizing:border-box}body{margin:0;height:100vh;overflow:hidden;background:linear-gradient(180deg,var(--bg-primary),var(--bg-secondary));color:var(--text-primary);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:80%;height:100vh;margin:0 auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;height:calc(100vh - 36px);min-height:0}.panel{display:flex;flex-direction:column;min-height:0;background:var(--panel);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);padding:18px}.panel-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}.panel-head h2{margin:0}.module-desc{margin:4px 0 0;color:var(--text-secondary);font-size:13px;line-height:1.45}.notice{min-height:20px;color:var(--text-secondary);font-size:13px;text-align:right;white-space:pre-wrap;margin-left:auto}.count{background:var(--primary-soft);color:var(--primary-color);padding:4px 10px;border-radius:999px;font-weight:700}.count-right{align-self:center}.search-row{display:flex;gap:10px}.status-filter{max-width:150px}.search{width:100%;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary);color:var(--text-primary);padding:10px 12px;margin-bottom:10px;outline:none}.search:focus{border-color:var(--primary-color);box-shadow:0 0 0 3px var(--primary-soft)}.credential-card{cursor:pointer;display:flex;align-items:center;gap:12px;border:1px solid var(--border);border-radius:14px;padding:12px;margin-top:10px;background:color-mix(in srgb,var(--panel) 92%,var(--bg-secondary))}.credential-card[hidden]{display:none}.card-main{min-width:0;flex:1}.auth-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;overflow-wrap:anywhere}.meta{color:var(--text-secondary);font-size:13px;margin-top:4px;line-height:1.55}.reset-line{display:inline-block;margin-top:2px}.card-actions{display:flex;gap:8px;flex-wrap:wrap}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}.bulk-actions{margin-bottom:10px}.right-actions{margin-left:auto;display:flex;gap:10px;align-items:center}.select-all{display:inline-flex;align-items:center;gap:6px;font-weight:700}.selected-count{color:var(--text-secondary);font-size:13px}.list-scroll{flex:1;min-height:0;overflow-y:auto;padding-right:4px}.list-scroll::-webkit-scrollbar{width:8px}.list-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:999px}button{border:0;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer;background:var(--primary-color);color:#fff}button.secondary{background:var(--primary-soft);color:var(--primary-color)}button.danger{background:var(--danger-color);color:#fff}button.ghost-danger{background:var(--danger-soft);color:var(--danger-color)}button.switch-button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;margin:4px 0 12px;background:var(--primary-soft);color:var(--text-primary)}.delete-count{background:var(--bg-secondary);border:1px solid var(--border);border-radius:999px;color:var(--text-secondary);font-size:12px;padding:4px 8px;white-space:nowrap}.switch-side{display:flex;align-items:center;gap:8px;margin-left:auto}.switch-state{color:var(--text-secondary);font-size:13px;white-space:nowrap}.switch-track{width:44px;height:24px;border-radius:999px;background:var(--border);padding:3px;transition:.18s;flex:0 0 auto}.switch-knob{display:block;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.25);transition:.18s}.switch-button.on .switch-track{background:var(--primary-color)}.switch-button.on .switch-knob{transform:translateX(20px)}.switch-label{font-weight:700}.empty{padding:22px;border:1px dashed var(--border);border-radius:14px;color:var(--text-secondary);text-align:center}@supports (height:100dvh){body,.wrap{height:100dvh}.grid{height:calc(100dvh - 36px)}}@media(max-width:820px){.grid{grid-template-columns:1fr}.wrap{padding:12px}.right-actions{margin-left:0;width:100%;justify-content:flex-end}}
+*{box-sizing:border-box}body{margin:0;height:100vh;overflow:hidden;background:linear-gradient(180deg,var(--bg-primary),var(--bg-secondary));color:var(--text-primary);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:80%;height:100vh;margin:0 auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;height:calc(100vh - 36px);min-height:0}.panel{display:flex;flex-direction:column;min-height:0;background:var(--panel);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);padding:18px}.panel-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}.panel-head h2{margin:0}.module-desc{margin:4px 0 0;color:var(--text-secondary);font-size:13px;line-height:1.45}.notice{white-space:pre-wrap}.toast{position:fixed;left:50%;bottom:72px;z-index:50;display:flex;align-items:center;gap:10px;max-width:min(520px,calc(100vw - 36px));padding:14px 18px;border-radius:8px;background:#111827;color:#fff;box-shadow:0 14px 35px rgba(15,23,42,.24);font-size:14px;line-height:1.45;opacity:0;pointer-events:none;transform:translate(-50%,12px);transition:opacity .18s,transform .18s}.toast.show{opacity:1;transform:translate(-50%,0)}[data-theme=dark] .toast{background:#fff;color:#0f172a;box-shadow:0 14px 35px rgba(0,0,0,.45)}.toast-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:currentColor;color:#111827;font-weight:800;font-size:12px;flex:0 0 auto}[data-theme=dark] .toast-icon{color:#fff}.spinner{width:16px;height:16px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;display:inline-block;animation:spin .8s linear infinite;flex:0 0 auto}@keyframes spin{to{transform:rotate(360deg)}}.count{background:var(--primary-soft);color:var(--primary-color);padding:4px 10px;border-radius:999px;font-weight:700}.count-right{align-self:center}.search-row{display:flex;gap:10px}.status-filter{max-width:150px}.search{width:100%;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary);color:var(--text-primary);padding:10px 12px;margin-bottom:10px;outline:none}.search:focus{border-color:var(--primary-color);box-shadow:0 0 0 3px var(--primary-soft)}.credential-card{cursor:pointer;display:flex;align-items:center;gap:12px;border:1px solid var(--border);border-radius:14px;padding:12px;margin-top:10px;background:color-mix(in srgb,var(--panel) 92%,var(--bg-secondary))}.credential-card[hidden]{display:none}.card-main{min-width:0;flex:1}.auth-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;overflow-wrap:anywhere}.meta{color:var(--text-secondary);font-size:13px;margin-top:4px;line-height:1.55}.reset-line{display:inline-block;margin-top:2px}.card-actions{display:flex;gap:8px;flex-wrap:wrap}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}.bulk-actions{margin-bottom:10px}.right-actions{margin-left:auto;display:flex;gap:10px;align-items:center}.select-all{display:inline-flex;align-items:center;gap:6px;font-weight:700}.selected-count{color:var(--text-secondary);font-size:13px}.list-scroll{flex:1;min-height:0;overflow-y:auto;padding-right:4px}.list-scroll::-webkit-scrollbar{width:8px}.list-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:999px}button{border:0;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer;background:var(--primary-color);color:#fff}button:disabled{cursor:not-allowed;opacity:.68}button.loading-button{display:inline-flex;align-items:center;gap:8px}button.loading-button::after{content:"";width:14px;height:14px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:spin .8s linear infinite;flex:0 0 auto}button.secondary{background:var(--primary-soft);color:var(--primary-color)}button.danger{background:var(--danger-color);color:#fff}button.ghost-danger{background:var(--danger-soft);color:var(--danger-color)}button.switch-button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;margin:4px 0 12px;background:var(--primary-soft);color:var(--text-primary)}.delete-count{background:var(--bg-secondary);border:1px solid var(--border);border-radius:999px;color:var(--text-secondary);font-size:12px;padding:4px 8px;white-space:nowrap}.switch-side{display:flex;align-items:center;gap:8px;margin-left:auto}.switch-state{color:var(--text-secondary);font-size:13px;white-space:nowrap}.switch-track{width:44px;height:24px;border-radius:999px;background:var(--border);padding:3px;transition:.18s;flex:0 0 auto}.switch-knob{display:block;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.25);transition:.18s}.switch-button.on .switch-track{background:var(--primary-color)}.switch-button.on .switch-knob{transform:translateX(20px)}.switch-label{font-weight:700}.empty{padding:22px;border:1px dashed var(--border);border-radius:14px;color:var(--text-secondary);text-align:center}@supports (height:100dvh){body,.wrap{height:100dvh}.grid{height:calc(100dvh - 36px)}}@media(max-width:820px){.grid{grid-template-columns:1fr}.wrap{padding:12px}.right-actions{margin-left:0;width:100%;justify-content:flex-end}}
 </style>
 </head>
 <body><main class="wrap">
-<section class="grid"><div class="panel"><div class="panel-head"><div><h2>401/402/403 停用列表</h2><p class="module-desc">当在请求CODEX遇到对应状态码的凭证时,会自动停用该凭证,保证不再轮询到该凭证。以减少请求时间。</p></div><div id="msg" class="notice" aria-live="polite"></div></div>` + auto401Switch + auto402Switch + auto403Switch + `<div class="search-row"><select id="disabledStatusFilter" class="search status-filter" onchange="filterList('disabled')"><option value="">全部状态码</option><option value="401">401</option><option value="402">402</option><option value="403">403</option></select><input id="disabledSearch" class="search" type="search" placeholder="搜索账号" oninput="filterList('disabled')"></div><div class="actions bulk-actions"><label class="select-all"><input id="selectAllDisabled" type="checkbox" onchange="toggleAll('disabled', this.checked)"> 全选</label><span class="selected-count">已选 <span id="disabledSelectedCount">0</span></span><button class="secondary" onclick="enableSelected()">恢复所选</button><button class="ghost-danger" onclick="deleteSelectedDisabled()">删除所选</button><span class="right-actions"><button class="secondary" onclick="refreshList('disabled')">刷新</button><span id="disabledCount" class="count count-right">` + strconv.Itoa(disabledStatus.Count) + `</span></span></div><div id="disabledList" class="list-scroll">` + disabledCards.String() + `</div></div>
-<div class="panel"><div class="panel-head"><div><h2>429 停用列表</h2><p class="module-desc">当在请求CODEX遇到对应状态码的凭证时,会自动停用该凭证,保证不再轮询到该凭证。以减少请求时间。</p></div></div>` + autoEnable429Switch + auto429Switch + `<input id="banSearch" class="search" type="search" placeholder="搜索账号" oninput="filterList('ban')"><div class="actions bulk-actions"><label class="select-all"><input id="selectAllBan" type="checkbox" onchange="toggleAll('ban', this.checked)"> 全选</label><span class="selected-count">已选 <span id="banSelectedCount">0</span></span><button class="secondary" onclick="unbanSelected()">恢复所选</button><button class="ghost-danger" onclick="deleteSelectedBans()">删除所选</button><span class="right-actions"><button class="secondary" onclick="refreshList('ban')">刷新</button><span id="banCount" class="count count-right">` + strconv.Itoa(banStatus.Count) + `</span></span></div><div id="banList" class="list-scroll">` + banCards.String() + `</div></div></section>
+<section class="grid"><div class="panel"><div class="panel-head"><div><h2>401/402/403 停用列表</h2><p class="module-desc">当在请求CODEX遇到对应状态码的凭证时,会自动停用该凭证,保证不再轮询到该凭证。以减少请求时间。</p></div><div id="msg" class="notice toast" role="status" aria-live="polite"></div></div>` + auto401Switch + auto402Switch + auto403Switch + `<div class="search-row"><select id="disabledStatusFilter" class="search status-filter" onchange="filterList('disabled')"><option value="">全部状态码</option><option value="401">401</option><option value="402">402</option><option value="403">403</option></select><input id="disabledSearch" class="search" type="search" placeholder="搜索账号" oninput="filterList('disabled')"></div><div class="actions bulk-actions"><label class="select-all"><input id="selectAllDisabled" type="checkbox" onchange="toggleAll('disabled', this.checked)"> 全选</label><span class="selected-count">已选 <span id="disabledSelectedCount">0</span></span><button class="secondary" onclick="enableSelected(this)">恢复所选</button><button class="ghost-danger" onclick="deleteSelectedDisabled(this)">删除所选</button><span class="right-actions"><button class="secondary" onclick="refreshList('disabled', this)">刷新</button><span id="disabledCount" class="count count-right">` + strconv.Itoa(disabledStatus.Count) + `</span></span></div><div id="disabledList" class="list-scroll">` + disabledCards.String() + `</div></div>
+<div class="panel"><div class="panel-head"><div><h2>429 停用列表</h2><p class="module-desc">当在请求CODEX遇到对应状态码的凭证时,会自动停用该凭证,保证不再轮询到该凭证。以减少请求时间。</p></div></div>` + autoEnable429Switch + auto429Switch + `<input id="banSearch" class="search" type="search" placeholder="搜索账号" oninput="filterList('ban')"><div class="actions bulk-actions"><label class="select-all"><input id="selectAllBan" type="checkbox" onchange="toggleAll('ban', this.checked)"> 全选</label><span class="selected-count">已选 <span id="banSelectedCount">0</span></span><button class="secondary" onclick="unbanSelected(this)">恢复所选</button><button class="ghost-danger" onclick="deleteSelectedBans(this)">删除所选</button><span class="right-actions"><button class="secondary" onclick="refreshList('ban', this)">刷新</button><span id="banCount" class="count count-right">` + strconv.Itoa(banStatus.Count) + `</span></span></div><div id="banList" class="list-scroll">` + banCards.String() + `</div></div></section>
 </main>
 <script>
 const initialSettings = ` + string(settingsJSON) + `;
 const base = '/v0/management/plugins/` + pluginName + `';
 const msg = document.getElementById('msg');
-function show(t){ if(msg){ msg.textContent = t || ''; } }
+let toastTimer = 0;
+function hideToast(){ if(!msg){ return; } clearTimeout(toastTimer); msg.classList.remove('show','loading'); msg.innerHTML = ''; }
+function setToast(t, loading){ if(!msg){ return; } clearTimeout(toastTimer); msg.innerHTML = (loading ? '<span class="spinner"></span>' : '<span class="toast-icon">!</span>') + '<span class="toast-text"></span>'; msg.querySelector('.toast-text').textContent = t || ''; if(loading){ msg.classList.add('loading'); }else{ msg.classList.remove('loading'); } msg.classList.add('show'); if(!loading){ toastTimer = setTimeout(hideToast,3000); } }
+function showToast(t){ if(t){ setToast(t, false); }else{ hideToast(); } }
+function showLoading(t){ setToast(t, true); }
+function show(t){ showToast(t); }
+function setButtonLoading(button, loading){ if(!button){ return; } button.disabled = loading; button.classList.toggle('loading-button', loading); }
 function listConfig(kind){ return kind === 'disabled' ? {list:'disabledList', count:'disabledCount', search:'disabledSearch', checks:'.disabled-check', master:'selectAllDisabled', selected:'disabledSelectedCount'} : {list:'banList', count:'banCount', search:'banSearch', checks:'.ban-check', master:'selectAllBan', selected:'banSelectedCount'}; }
 function decodeStored(raw){
   if(!raw || raw.indexOf('enc::v1::') !== 0){ return raw; }
@@ -1767,28 +1789,30 @@ function readManagementKey(){
 }
 function headers(){ const h = {'Content-Type':'application/json'}; const key = readManagementKey(); if(key){ h.Authorization = 'Bearer ' + key; } return h; }
 async function postJSON(path, body){ const h = headers(); if(!h.Authorization){ show('未读取到 CPA 管理密钥，请在 CPA 登录页勾选记住密码后重新登录，再打开插件页面。'); return false; } const r = await fetch(base + path, {method:'POST', headers: h, body: JSON.stringify(body||{})}); const text = await r.text(); if(!r.ok){ show('请求失败 HTTP '+r.status+'\n'+text); return false; } return true; }
-async function post(path, body, refreshKind){ const ok = await postJSON(path, body); if(!ok){ return; } if(refreshKind){ await refreshList(refreshKind); show('操作完成'); return; } location.reload(); }
-async function refreshList(kind){ const cfg = listConfig(kind); show('正在刷新...'); const r = await fetch(window.location.href, {cache:'no-store'}); const text = await r.text(); if(!r.ok){ show('刷新失败 HTTP '+r.status+'\n'+text); return; } const doc = new DOMParser().parseFromString(text, 'text/html'); const nextList = doc.getElementById(cfg.list); const nextCount = doc.getElementById(cfg.count); if(nextList && nextCount){ document.getElementById(cfg.list).innerHTML = nextList.innerHTML; document.getElementById(cfg.count).textContent = nextCount.textContent; filterList(kind); show(''); } }
+async function post(path, body, refreshKind, button){ setButtonLoading(button, true); try{ const ok = await postJSON(path, body); if(!ok){ return; } if(refreshKind){ await refreshList(refreshKind); show('操作完成'); return; } location.reload(); }finally{ setButtonLoading(button, false); } }
+async function refreshList(kind, button){ setButtonLoading(button, true); try{ const cfg = listConfig(kind); showLoading('正在刷新...'); const r = await fetch(window.location.href, {cache:'no-store'}); const text = await r.text(); if(!r.ok){ show('刷新失败 HTTP '+r.status+'\n'+text); return; } const doc = new DOMParser().parseFromString(text, 'text/html'); const nextList = doc.getElementById(cfg.list); const nextCount = doc.getElementById(cfg.count); if(nextList && nextCount){ document.getElementById(cfg.list).innerHTML = nextList.innerHTML; document.getElementById(cfg.count).textContent = nextCount.textContent; const countIDs = kind === 'disabled' ? ['deletedCount401','deletedCount402','deletedCount403'] : ['deletedCount429']; for(const id of countIDs){ const next = doc.getElementById(id); const current = document.getElementById(id); if(next && current){ document.getElementById(id).textContent = next.textContent; } } filterList(kind); hideToast(); } }finally{ setButtonLoading(button, false); } }
 function visibleChecks(kind){ const cfg = listConfig(kind); return Array.from(document.querySelectorAll(cfg.checks)).filter(e => !e.closest('.credential-card').hidden); }
 function toggleCardSelection(event, kind){ if(event.target.closest('button,input,label')){ return; } const card = event.currentTarget; const box = card.querySelector('input[type=checkbox]'); if(!box){ return; } box.checked = !box.checked; updateSelection(kind); }
 function updateSelection(kind){ const cfg = listConfig(kind); const checks = Array.from(document.querySelectorAll(cfg.checks)); const checked = checks.filter(e => e.checked); const visible = visibleChecks(kind); const visibleChecked = visible.filter(e => e.checked); const selected = document.getElementById(cfg.selected); const master = document.getElementById(cfg.master); if(selected){ selected.textContent = checked.length; } if(master){ master.checked = visible.length > 0 && visibleChecked.length === visible.length; master.indeterminate = visibleChecked.length > 0 && visibleChecked.length < visible.length; } }
 function toggleAll(kind, checked){ visibleChecks(kind).forEach(e => e.checked = checked); updateSelection(kind); }
 function filterList(kind){ const cfg = listConfig(kind); const input = document.getElementById(cfg.search); const q = input ? input.value.trim().toLowerCase() : ''; const statusFilter = kind === 'disabled' ? document.getElementById('disabledStatusFilter') : null; const status = statusFilter ? statusFilter.value : ''; document.querySelectorAll('#' + cfg.list + ' .credential-card').forEach(card => { const auth = (card.dataset.auth || '').toLowerCase(); const cardStatus = card.dataset.status || ''; card.hidden = (!!q && auth.indexOf(q) < 0) || (!!status && cardStatus !== status); }); updateSelection(kind); }
 function selectedValues(kind){ const cfg = listConfig(kind); return Array.from(document.querySelectorAll(cfg.checks + ':checked')).map(e => e.value); }
-async function postSelected(items, path, kind, confirmText){ if(!items.length){ show('请先选择凭证'); return; } if(confirmText && !confirm(confirmText)){ return; } for(const authID of items){ const ok = await postJSON(path, {auth_id:authID}); if(!ok){ return; } } await refreshList(kind); show('已处理 '+items.length+' 个凭证'); }
-function toggleAutoDelete(key){ const next = !initialSettings[key]; if(next && key.indexOf('auto_delete_') === 0 && !confirm('开启后,被自动删除的凭证无法恢复,请确认无误后再开启。')){ return; } post('/settings', {[key]: next}); }
-function enableAuth(authID){ post('/enable', {auth_id:authID}, 'disabled'); }
-function deleteDisabled(authID){ if(confirm('删除 '+authID+' ?')) post('/delete-disabled', {auth_id:authID}, 'disabled'); }
-function enableSelected(){ postSelected(selectedValues('disabled'), '/enable', 'disabled', ''); }
-function deleteSelectedDisabled(){ const items = selectedValues('disabled'); postSelected(items, '/delete-disabled', 'disabled', '删除所选 '+items.length+' 个 401/402/403 停用凭证文件？'); }
+async function postSelected(items, path, kind, confirmText, button){ if(!items.length){ show('请先选择凭证'); return; } if(confirmText && !confirm(confirmText)){ return; } setButtonLoading(button, true); try{ showLoading('正在处理...'); for(const authID of items){ const ok = await postJSON(path, {auth_id:authID}); if(!ok){ return; } } await refreshList(kind); show('已处理 '+items.length+' 个凭证'); }finally{ setButtonLoading(button, false); } }
+function toggleAutoDelete(key, button){ const next = !initialSettings[key]; if(next && key.indexOf('auto_delete_') === 0 && !confirm('开启后,被自动删除的凭证无法恢复,请确认无误后再开启。')){ return; } post('/settings', {[key]: next}, '', button); }
+function enableAuth(authID, button){ post('/enable', {auth_id:authID}, 'disabled', button); }
+function deleteDisabled(authID, button){ if(confirm('删除 '+authID+' ?')) post('/delete-disabled', {auth_id:authID}, 'disabled', button); }
+function enableSelected(button){ postSelected(selectedValues('disabled'), '/enable', 'disabled', '', button); }
+function deleteSelectedDisabled(button){ const items = selectedValues('disabled'); postSelected(items, '/delete-disabled', 'disabled', '删除所选 '+items.length+' 个 401/402/403 停用凭证文件？', button); }
 function decodeJWTPart(token){ try{ const part = String(token||'').split('.')[1]; if(!part){ return null; } const padded = part.replace(/-/g,'+').replace(/_/g,'/').padEnd(Math.ceil(part.length/4)*4,'='); return JSON.parse(atob(padded)); }catch(e){ return null; } }
 function accountIDFromAuth(auth){ const tokens = [auth && auth.id_token, auth && auth.idToken, auth && auth.metadata && auth.metadata.id_token, auth && auth.attributes && auth.attributes.id_token]; for(const token of tokens){ const payload = decodeJWTPart(token); const id = payload && (payload.chatgpt_account_id || payload.chatgptAccountId); if(id){ return id; } } return ''; }
 async function fetchAuthMeta(authID, h){ const r = await fetch('/v0/management/auth-files', {headers:h, cache:'no-store'}); if(!r.ok){ throw new Error('读取认证列表失败 HTTP '+r.status); } const data = await r.json(); const list = Array.isArray(data) ? data : (Array.isArray(data.files) ? data.files : (Array.isArray(data.auth_files) ? data.auth_files : [])); const auth = list.find(e => (e.name || e.filename || e.auth_id || e.authId) === authID) || {}; let authIndex = auth.auth_index || auth.authIndex || ''; let accountID = accountIDFromAuth(auth); if(!authIndex || !accountID){ const d = await fetch('/v0/management/auth-files/download?name='+encodeURIComponent(authID), {headers:h, cache:'no-store'}); if(d.ok){ try{ const full = JSON.parse(await d.text()); authIndex = authIndex || full.auth_index || full.authIndex || ''; accountID = accountID || accountIDFromAuth(full); }catch(e){} } } return {authIndex:authIndex, accountID:accountID}; }
 async function checkQuota(button){
+  setButtonLoading(button, true);
+  try{
   const authID = button.dataset.auth;
   const h = headers();
   if(!h.Authorization){ show('未读取到 CPA 管理密钥，请在 CPA 登录页勾选记住密码后重新登录，再打开插件页面。'); return; }
-  show('正在查询 '+authID+' 额度...');
+  showLoading('正在查询 '+authID+' 额度...');
   let meta; try{ meta = await fetchAuthMeta(authID, h); }catch(e){ show(e.message || String(e)); return; }
   const authIndex = meta.authIndex || button.dataset.authIndex;
   if(!authIndex){ show('查询额度失败：认证文件缺少 auth_index'); return; }
@@ -1806,6 +1830,7 @@ async function checkQuota(button){
   if(!quotaAvailable(body)){ show('额度仍不可用，未恢复 '+authID); return; }
   const ok = await postJSON('/unban', {auth_id:authID});
   if(ok){ await refreshList('ban'); show('额度可用，已恢复 '+authID); }
+  }finally{ setButtonLoading(button, false); }
 }
 function quotaAvailable(body){
   const text = (typeof body === 'string' ? body : JSON.stringify(body || {})).toLowerCase();
@@ -1813,10 +1838,10 @@ function quotaAvailable(body){
   if(text.indexOf('"limit_reached":false') >= 0 || text.indexOf('"limitreached":false') >= 0){ return true; }
   return false;
 }
-function unbanAuth(authID){ post('/unban', {auth_id:authID}, 'ban'); }
-function deleteBan(authID){ if(confirm('删除 '+authID+' ?')) post('/delete-ban', {auth_id:authID}, 'ban'); }
-function unbanSelected(){ postSelected(selectedValues('ban'), '/unban', 'ban', ''); }
-function deleteSelectedBans(){ const items = selectedValues('ban'); postSelected(items, '/delete-ban', 'ban', '删除所选 '+items.length+' 个 429 停用凭证文件？'); }
+function unbanAuth(authID, button){ post('/unban', {auth_id:authID}, 'ban', button); }
+function deleteBan(authID, button){ if(confirm('删除 '+authID+' ?')) post('/delete-ban', {auth_id:authID}, 'ban', button); }
+function unbanSelected(button){ postSelected(selectedValues('ban'), '/unban', 'ban', '', button); }
+function deleteSelectedBans(button){ const items = selectedValues('ban'); postSelected(items, '/delete-ban', 'ban', '删除所选 '+items.length+' 个 429 停用凭证文件？', button); }
 updateSelection('disabled');
 updateSelection('ban');
 </script>

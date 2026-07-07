@@ -44,12 +44,14 @@ func resetStoresForTest(t *testing.T) {
 	oldBanAuthDir := banStore.authDir
 	oldAutoEnable429 := banStore.autoEnable429
 	oldAutoDelete429 := banStore.autoDelete429
+	oldDeleted429 := banStore.deleted429
 	oldBanLoaded := banStore.loaded
 	banStore.bans = make(map[string]banEntry)
 	banStore.path = filepath.Join(tmp, "bans.json")
 	banStore.authDir = tmp
 	banStore.autoEnable429 = true
 	banStore.autoDelete429 = false
+	banStore.deleted429 = 0
 	banStore.loaded = true
 	banStore.mu.Unlock()
 
@@ -83,6 +85,7 @@ func resetStoresForTest(t *testing.T) {
 		banStore.authDir = oldBanAuthDir
 		banStore.autoEnable429 = oldAutoEnable429
 		banStore.autoDelete429 = oldAutoDelete429
+		banStore.deleted429 = oldDeleted429
 		banStore.loaded = oldBanLoaded
 		banStore.mu.Unlock()
 
@@ -277,6 +280,10 @@ func TestAutoDelete429DeletesAuthFileInsteadOfBanning(t *testing.T) {
 	if _, ok := banStore.lookup("delete-429.json"); ok {
 		t.Fatal("auto-deleted auth should not remain banned")
 	}
+	settings := currentManagementSettings()
+	if settings.Deleted429Count != 1 {
+		t.Fatalf("429 deleted count=%d, want 1", settings.Deleted429Count)
+	}
 }
 
 func TestSchedulerKeepsExpired429BannedWhenAutoEnableOff(t *testing.T) {
@@ -333,6 +340,8 @@ func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 	disabledStore.incrementDeletedCount(statusUnauthorized)
 	disabledStore.incrementDeletedCount(statusUnauthorized)
 	disabledStore.incrementDeletedCount(statusPaymentRequired)
+	banStore.incrementDeletedCount()
+	banStore.incrementDeletedCount()
 	banStore.set("banned-ui.json", banEntry{ResetAt: time.Date(2026, 7, 9, 2, 3, 4, 0, time.UTC), Window: "5h"})
 	resp := dispatchManagement(pluginapi.ManagementRequest{Method: "GET", Path: "/v0/resource/plugins/codex-auth-guard/status"})
 	if resp.StatusCode != 200 {
@@ -351,6 +360,7 @@ func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 		"id=\"deletedCount401\" class=\"delete-count\">已删除 2</span>",
 		"id=\"deletedCount402\" class=\"delete-count\">已删除 1</span>",
 		"id=\"deletedCount403\" class=\"delete-count\">已删除 0</span>",
+		"id=\"deletedCount429\" class=\"delete-count\">已删除 2</span>",
 		"自动删除 401：当请求遇到401凭证时自动删除该凭证。",
 		"自动删除 402：当请求遇到402凭证时自动删除该凭证。",
 		"自动删除 403：当请求遇到403凭证时自动删除该凭证。",
@@ -364,9 +374,9 @@ func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 		"aria-checked=\"false\"",
 		"id=\"toggleAutoEnable429\"",
 		"id=\"toggleAuto429\"",
-		"toggleAutoDelete('auto_delete_401')",
-		"toggleAutoDelete('auto_enable_429')",
-		"toggleAutoDelete('auto_delete_429')",
+		"toggleAutoDelete('auto_delete_401', this)",
+		"toggleAutoDelete('auto_enable_429', this)",
+		"toggleAutoDelete('auto_delete_429', this)",
 		"Authorization",
 		"Bearer ",
 		"readManagementKey",
@@ -386,17 +396,38 @@ func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 		"已选 <span id=\"banSelectedCount\">0</span>",
 		"恢复所选",
 		"删除所选",
-		"enableSelected()",
-		"deleteSelectedDisabled()",
-		"unbanSelected()",
-		"deleteSelectedBans()",
-		"onclick=\"refreshList('disabled')\"",
-		"onclick=\"refreshList('ban')\"",
+		"enableSelected(this)",
+		"deleteSelectedDisabled(this)",
+		"unbanSelected(this)",
+		"deleteSelectedBans(this)",
+		"onclick=\"refreshList('disabled', this)\"",
+		"onclick=\"refreshList('ban', this)\"",
 		"id=\"disabledList\"",
 		"id=\"banList\"",
 		"id=\"disabledCount\"",
 		"id=\"banCount\"",
 		"class=\"count count-right\"",
+		"id=\"msg\" class=\"notice toast\"",
+		"role=\"status\"",
+		"bottom:72px",
+		"background:#111827",
+		"[data-theme=dark] .toast{background:#fff;color:#0f172a",
+		"@keyframes spin",
+		"classList.add('show')",
+		"classList.add('loading')",
+		"setTimeout(hideToast,3000)",
+		"function showToast",
+		"function showLoading",
+		"function hideToast",
+		"function setButtonLoading",
+		"button.disabled = loading",
+		"classList.toggle('loading-button', loading)",
+		"onclick=\"refreshList('disabled', this)\"",
+		"onclick=\"refreshList('ban', this)\"",
+		"enableAuth(this.dataset.auth, this)",
+		"deleteDisabled(this.dataset.auth, this)",
+		"unbanAuth(this.dataset.auth, this)",
+		"deleteBan(this.dataset.auth, this)",
 		"刷新",
 		"class=\"list-scroll\"",
 		"max-width:80%",
@@ -467,15 +498,18 @@ func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 		}
 	}
 
-	for _, label := range []string{
-		"自动删除 401：当请求遇到401凭证时自动删除该凭证。",
-		"自动删除 402：当请求遇到402凭证时自动删除该凭证。",
-		"自动删除 403：当请求遇到403凭证时自动删除该凭证。",
-		"自动删除 429：当请求遇到429凭证时自动删除该凭证。",
+	for _, tt := range []struct {
+		label string
+		count string
+	}{
+		{"自动删除 401：当请求遇到401凭证时自动删除该凭证。", `<span id="deletedCount401" class="delete-count">已删除 2</span>`},
+		{"自动删除 402：当请求遇到402凭证时自动删除该凭证。", `<span id="deletedCount402" class="delete-count">已删除 1</span>`},
+		{"自动删除 403：当请求遇到403凭证时自动删除该凭证。", `<span id="deletedCount403" class="delete-count">已删除 0</span>`},
+		{"自动删除 429：当请求遇到429凭证时自动删除该凭证。", `<span id="deletedCount429" class="delete-count">已删除 2</span>`},
 	} {
-		want := `<span class="switch-label">` + label + `</span><span class="switch-side"><span class="switch-state">已关闭</span><span class="switch-track"`
+		want := `<span class="switch-label">` + tt.label + `</span><span class="switch-side">` + tt.count + `<span class="switch-state">已关闭</span><span class="switch-track"`
 		if !strings.Contains(body, want) {
-			t.Fatalf("%s switch state must render beside track: %s", label, body)
+			t.Fatalf("%s switch state/count order invalid: %s", tt.label, body)
 		}
 	}
 	if !strings.Contains(body, `<span class="switch-label">自动启用 429：重置时间到了自动启用该凭证。</span><span class="switch-side"><span class="switch-state">已开启</span><span class="switch-track"`) {
@@ -483,6 +517,18 @@ func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 	}
 	if strings.Contains(body, `自动删除 401：已关闭`) || strings.Contains(body, `自动删除 429：已关闭`) {
 		t.Fatalf("switch label must contain description instead of state: %s", body)
+	}
+	for _, old := range []string{
+		`show('正在刷新...')`,
+		`show('正在查询 `,
+		`class="notice" aria-live="polite"`,
+	} {
+		if strings.Contains(body, old) {
+			t.Fatalf("loading/status UI still uses old text-only behavior %q in %s", old, body)
+		}
+	}
+	if !strings.Contains(body, `deletedCount429`) || !strings.Contains(body, `document.getElementById(id).textContent = next.textContent`) {
+		t.Fatalf("refreshList must update deleted count spans: %s", body)
 	}
 	message := strings.Index(body, `id="msg"`)
 	disabledTitle := strings.Index(body, `<h2>401/402/403 停用列表</h2>`)
@@ -494,7 +540,7 @@ func TestCombinedStatusPageRendersPanelActionsAndScrollableLists(t *testing.T) {
 	search := strings.Index(body, `id="disabledSearch"`)
 	actions := strings.Index(body, `class="actions bulk-actions"`)
 	master := strings.Index(body, `id="selectAllDisabled"`)
-	refresh := strings.Index(body, `onclick="refreshList('disabled')"`)
+	refresh := strings.Index(body, `onclick="refreshList('disabled', this)"`)
 	count := strings.Index(body, `id="disabledCount"`)
 	list := strings.Index(body, `id="disabledList"`)
 	if search < 0 || actions < 0 || master < 0 || refresh < 0 || count < 0 || list < 0 || search > actions || actions > master || master > refresh || refresh > count || count > list {
